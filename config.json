@@ -1,0 +1,7 @@
+{
+  "camera_index": 0,
+  "hsv_lower": [5, 120, 150],
+  "hsv_upper": [20, 255, 255],
+  "min_radius_px": 8,
+  "ball_diameter_m": 0.21
+}
