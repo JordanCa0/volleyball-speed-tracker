@@ -1,5 +1,5 @@
 {
-  "camera_index": 0,
+  "camera_index": 1,
   "hsv_lower": [5, 120, 150],
   "hsv_upper": [20, 255, 255],
   "min_radius_px": 8,

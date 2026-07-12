@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Downloaded model weights (re-fetched automatically on first run)
+*.pt
+
+# Video footage and annotated outputs (large binaries; keep out of git)
+*.mp4
+*.mov
+*.avi
+
+# macOS
+.DS_Store
