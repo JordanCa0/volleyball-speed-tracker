@@ -1,7 +1,16 @@
 {
   "camera_index": 1,
-  "hsv_lower": [5, 120, 150],
-  "hsv_upper": [20, 255, 255],
+  "hsv_lower": [
+    8,
+    156,
+    97
+  ],
+  "hsv_upper": [
+    32,
+    255,
+    255
+  ],
   "min_radius_px": 8,
-  "ball_diameter_m": 0.21
+  "ball_diameter_m": 0.21,
+  "ball_radius_px": 10.0
 }
