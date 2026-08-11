@@ -12,5 +12,9 @@
   ],
   "min_radius_px": 8,
   "ball_diameter_m": 0.21,
-  "ball_radius_px": 10.0
+  "ball_radius_px": 10.0,
+  "scale": {
+    "method": "two_point",
+    "meters_per_px": 0.008849403514997049
+  }
 }

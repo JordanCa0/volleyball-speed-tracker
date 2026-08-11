@@ -72,6 +72,34 @@ the config; a color-based detector then finds the ball even when YOLO
 misses it. By default a detected ball must also be *moving* — this rejects
 static ball-colored objects (broadcast GUI overlays, floors, walls).
 
+## Measuring speed (recorded clips)
+
+Once the ball color is calibrated (press `b` in `detect.py`), run the
+speed pipeline on a clip from a **stationary** camera:
+
+```bash
+# first run: click two points a known distance apart on the first frame
+# (court lines are exact: attack line -> center line = 3.0 m)
+.venv/bin/python track.py --source clip.mp4 --calibrate-distance 3.0
+
+# later runs reuse the saved scale
+.venv/bin/python track.py --source clip.mp4 --save out.mp4 --csv hits.csv
+```
+
+Shows the ball's motion trail, live speed, and the peak speed of the last
+hit; prints a per-hit table at the end (peak speed = speed just after
+contact, same convention as a radar gun). Each contact — hand, block,
+floor — starts a new logged hit.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--calibrate-distance M` | — | Click 2 points M meters apart to set the pixel scale |
+| `--threshold-kmh` | `15` | Speed above which a hit is logged |
+| `--max-speed-kmh` | `130` | Fastest jump the tracker will believe |
+| `--csv OUT.csv` | off | Export the hit log |
+
+Run the test suite with `.venv/bin/python -m pytest tests`.
+
 ## Finding your camera index
 
 On macOS, camera index 0 is often an iPhone (Continuity Camera) rather

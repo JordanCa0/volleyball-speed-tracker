@@ -22,8 +22,9 @@ import json
 import time
 
 import cv2
-import numpy as np
 from ultralytics import YOLO
+
+from color_ball import detect_ball_by_color, sample_ball_color
 
 # COCO class ids the pretrained model was trained on
 PERSON = 0
@@ -54,45 +55,6 @@ def draw_yolo_detections(frame, result, person_conf, ball_conf, skip_ball):
         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
         draw_box(frame, x1, y1, x2, y2, f"{label} {conf:.0%}", color,
                  thickness=3 if cls == SPORTS_BALL else 2)
-
-
-def sample_ball_color(frame, roi):
-    """Median HSV of the central half of the selected box -> detection bounds."""
-    x, y, w, h = roi
-    patch = frame[y + h // 4: y + h - h // 4 or y + h,
-                  x + w // 4: x + w - w // 4 or x + w]
-    if patch.size == 0:
-        patch = frame[y:y + h, x:x + w]
-    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-    med = np.median(hsv.reshape(-1, 3), axis=0)
-    lower = [int(max(med[0] - 12, 0)), int(max(med[1] - 70, 30)), int(max(med[2] - 70, 30))]
-    upper = [int(min(med[0] + 12, 179)), 255, 255]
-    return lower, upper
-
-
-def detect_ball_by_color(frame, lower, upper, min_r, max_r, motion_mask=None):
-    """Largest plausibly-circular blob in the color mask, or None."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-    if motion_mask is not None:
-        # Require ball pixels to also be moving: rejects static same-color
-        # objects (broadcast GUI overlays, floors, walls).
-        mask = cv2.bitwise_and(mask, motion_mask)
-    mask = cv2.erode(mask, None, iterations=1)
-    mask = cv2.dilate(mask, None, iterations=2)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best = None
-    for c in contours:
-        (x, y), r = cv2.minEnclosingCircle(c)
-        if not min_r <= r <= max_r:
-            continue
-        # Tolerate motion-blur elongation but reject long thin streaks (limbs, lines)
-        circularity = cv2.contourArea(c) / (np.pi * r * r + 1e-6)
-        if circularity < 0.35:
-            continue
-        if best is None or r > best[2]:
-            best = (x, y, r)
-    return best
 
 
 def main():
