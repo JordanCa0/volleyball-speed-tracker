@@ -1,12 +1,25 @@
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
 
 from speed import SpeedEngine
-from tracker import Detection
 
 G = 9.81
+
+
+@dataclass
+class Detection:
+    """Minimal stand-in for whatever the tracking pipeline feeds the engine.
+
+    `SpeedEngine.update` only reads `.timestamp` and `.center_px`, so the
+    test defines its own rather than coupling to a detector's type.
+    """
+    frame_idx: int
+    timestamp: float
+    center_px: tuple[float, float]
+    radius_px: float
 
 
 def feed(engine, positions_m, fps, mpp, track_id=0):

@@ -1,4 +1,4 @@
-"""Volleyball tracker v2 — ball and player tracking.
+"""Ball and player tracking.
 
 Follows the approach in Roboflow's "Tracking Ball Sports with Computer
 Vision": sliced inference to find a small fast ball, a centroid-buffer
