@@ -55,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ball-imgsz", type=int, default=640,
                         help="inference size per tile")
     parser.add_argument("--player-imgsz", type=int, default=960)
+    parser.add_argument("--ball-max-size", type=float, default=60.0,
+                        help="reject ball candidates whose longer box side "
+                             "exceeds this many pixels (0 disables)")
+    parser.add_argument("--ball-max-aspect", type=float, default=1.6,
+                        help="reject ball candidates less square than this "
+                             "long/short side ratio (0 disables)")
     parser.add_argument("--buffer-size", type=int, default=10,
                         help="frames of candidate history for the ball filter; "
                              "lower follows a fast ball better, higher rejects "
@@ -101,6 +107,8 @@ def main() -> None:
             ball_backend,
             frame_wh=(video_info.width, video_info.height),
             slice_inference=not args.no_slice,
+            max_side_px=args.ball_max_size or None,
+            max_aspect=args.ball_max_aspect or None,
         )
         ball_tracker = BallTracker(buffer_size=args.buffer_size)
         ball_annotator = BallAnnotator(radius=12, buffer_size=args.trail_length)

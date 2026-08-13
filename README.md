@@ -36,9 +36,52 @@ Requires Python 3.11+ and macOS (other platforms untested).
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python fetch_models.py     # pretrained volleyball ball detector (~43 MB)
 ```
 
-The first run downloads the YOLO weights (~6 MB) automatically.
+Stock YOLO weights download automatically on first run.
+
+## The pretrained ball model
+
+Stock COCO weights are not a volleyball detector — on sample broadcast
+footage the real ball scored 0.13 while a player's shoe scored 0.15.
+`fetch_models.py` pulls a YOLOv8n-seg model trained specifically on
+volleyball (200 epochs, imgsz 1024, single `ball` class) from
+[masouduut94/volleyball_analytics](https://github.com/masouduut94/volleyball_analytics).
+
+```bash
+.venv/bin/python track.py --source clip.mp4 \
+    --ball-model models/volleyball_ball.pt --ball-conf 0.25 --ball-imgsz 1024
+```
+
+Measured against stock COCO over 120 frames of broadcast footage:
+
+| | stock COCO | volleyball model |
+|---|---|---|
+| frames with a ball candidate | 92% | **100%** |
+| mean best confidence | 0.41 | **0.85** |
+
+It is a large gain in *recall* and a smaller one in precision. The model
+also fires confidently on printed volleyballs (sponsor banners, scoreboard
+graphics), and in a club gym with lime-green walls it fires on wall panels,
+lit windows and ceiling fixtures — roughly 9 candidates per frame. The shape
+gate below is what makes that usable.
+
+### Shape gating
+
+A volleyball is round and small; the things a ball detector confuses it with
+usually aren't. `--ball-max-size` and `--ball-max-aspect` reject candidates
+on box geometry before they reach the tracker:
+
+| footage | candidates/frame, no gate | with 60px / 1.6 gate |
+|---|---|---|
+| broadcast | 6.0 | **2.4** |
+| club gym | 8.8 | **2.0** |
+
+On one club-gym frame this cut 17 candidates to 2, keeping the real ball as
+the highest-confidence detection. The cost is recall: 7 of 80 club-gym
+frames lost their only candidate. Raise `--ball-max-size` if your ball is
+larger in frame (closer camera, higher resolution).
 
 ## Usage
 
@@ -68,7 +111,9 @@ Press `q` to quit the live window.
 | `--player-model` | `yolo11n.pt` | Weights for player detection |
 | `--ball-conf` | `0.10` | Ball confidence floor, kept low on purpose |
 | `--player-conf` | `0.30` | Player confidence floor |
-| `--ball-imgsz` | `640` | Inference size per tile |
+| `--ball-imgsz` | `640` | Inference size per tile (use `1024` for the volleyball model) |
+| `--ball-max-size` | `60` | Reject candidates whose longer box side exceeds this (px); `0` disables |
+| `--ball-max-aspect` | `1.6` | Reject candidates less square than this ratio; `0` disables |
 | `--player-imgsz` | `960` | Inference size for the full frame |
 | `--buffer-size` | `10` | Frames of candidate history for the ball filter |
 | `--trail-length` | `5` | Frames of ball trail to draw |
@@ -86,14 +131,22 @@ Run the test suite with `.venv/bin/python -m pytest tests`.
 
 ## Known limitations
 
-- **Stock COCO weights are the bottleneck.** On sample footage the real ball
-  scores ~0.13 confidence while a player's shoe scores 0.15, and the ball is
-  missed entirely in frames where it is plainly visible. Fine-tuning a ball
-  detector is the next piece of work.
+- **Stock COCO weights are unusable for the ball** — use the pretrained
+  volleyball model above.
+- **The pretrained model is out of distribution on club-gym footage.**
+  Lime-green wall panels and lit windows read as balls. Shape gating removes
+  most of it; fine-tuning on your own footage is the real fix.
 - **Printed balls are permanent false positives.** Sponsor banners and
-  scoreboard graphics in broadcast footage contain volleyball images. They
-  never move, so no temporal filter removes them; they need to be labelled as
-  hard negatives during fine-tuning.
+  scoreboard graphics contain volleyball images, and a volleyball-specific
+  model detects them *more* confidently than a generic one (0.79 on a
+  scoreboard graphic). They never move, so no temporal filter removes them;
+  they need to be labelled as hard negatives during fine-tuning.
+- **Camera motion breaks static-background tricks.** Measured over 400
+  frames: broadcast footage drifts 44px total (near-locked), but club
+  handheld footage pans 1017px and zooms 5.7%. Background subtraction and
+  fixed court polygons both require motion compensation on the latter — and
+  so will any speed measurement, since a 54px/frame pan swamps the ball's own
+  displacement.
 - **No court-boundary filtering.** Benches, coaches, referees and the front
   row of the crowd are all tracked as players.
 - **The ball filter lags.** It picks the candidate nearest the centroid of
@@ -116,6 +169,7 @@ For best results (per [TDD.md §3](TDD.md)):
 | File | Purpose |
 |---|---|
 | `track.py` | CLI entry point — detect and track ball + players |
+| `fetch_models.py` | Download the pretrained volleyball ball detector |
 | `tracking/detectors.py` | YOLO backend, sliced ball detector, player detector |
 | `tracking/trackers.py` | Ball centroid filter, ByteTrack player tracker |
 | `tracking/annotators.py` | Ball trail and player ellipse overlays |

@@ -78,9 +78,13 @@ class BallDetector:
 
     def __init__(self, backend: YoloBackend, frame_wh: tuple[int, int],
                  overlap_wh: tuple[int, int] = (100, 100),
-                 iou_threshold: float = 0.1, slice_inference: bool = True):
+                 iou_threshold: float = 0.1, slice_inference: bool = True,
+                 max_side_px: float | None = None,
+                 max_aspect: float | None = None):
         self.backend = backend
         self.slice_inference = slice_inference
+        self.max_side_px = max_side_px
+        self.max_aspect = max_aspect
         width, height = frame_wh
         self.slicer = sv.InferenceSlicer(
             callback=backend,
@@ -90,10 +94,32 @@ class BallDetector:
             iou_threshold=iou_threshold,
         )
 
+    def _shape_filter(self, detections: sv.Detections) -> sv.Detections:
+        """Drop candidates that aren't ball-shaped.
+
+        A volleyball is round and, at any realistic camera distance, small.
+        Wall panels, lit windows and ceiling fixtures that a ball detector
+        fires on are typically both much larger and less square, so gating on
+        box size and aspect ratio removes most of them without touching the
+        ball. On sample club-gym footage a 60px limit drops ~75% of
+        candidates.
+        """
+        if len(detections) == 0:
+            return detections
+        widths = detections.xyxy[:, 2] - detections.xyxy[:, 0]
+        heights = detections.xyxy[:, 3] - detections.xyxy[:, 1]
+        keep = np.ones(len(detections), dtype=bool)
+        if self.max_side_px is not None:
+            keep &= np.maximum(widths, heights) <= self.max_side_px
+        if self.max_aspect is not None:
+            longer = np.maximum(widths, heights)
+            shorter = np.maximum(np.minimum(widths, heights), 1e-6)
+            keep &= (longer / shorter) <= self.max_aspect
+        return detections[keep]
+
     def __call__(self, frame: np.ndarray) -> sv.Detections:
-        if not self.slice_inference:
-            return self.backend(frame)
-        return self.slicer(frame)
+        raw = self.backend(frame) if not self.slice_inference else self.slicer(frame)
+        return self._shape_filter(raw)
 
 
 class PlayerDetector:
