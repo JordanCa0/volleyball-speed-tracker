@@ -83,6 +83,26 @@ the highest-confidence detection. The cost is recall: 7 of 80 club-gym
 frames lost their only candidate. Raise `--ball-max-size` if your ball is
 larger in frame (closer camera, higher resolution).
 
+### Checking it on your own footage
+
+Render the same frames twice and watch them side by side:
+
+```bash
+.venv/bin/python track.py --source clip1.mp4 --max-frames 120 \
+    --no-display --save cmp_stock.mp4
+
+.venv/bin/python track.py --source clip1.mp4 --max-frames 120 \
+    --ball-model models/volleyball_ball.pt --ball-conf 0.25 --ball-imgsz 1024 \
+    --no-display --save cmp_pretrained.mp4
+```
+
+**Judge it by watching the overlay, not by the percentage the run prints.**
+That counter says how often the filter emitted *something*, and stock weights
+emit a false positive almost every frame — on sample club-gym footage stock
+scores 99% and the volleyball model 89%, which is the opposite of the truth.
+What matters is whether the marker sits on the ball and stays there through a
+rally.
+
 ## Usage
 
 ```bash

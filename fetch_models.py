@@ -28,12 +28,39 @@ CHECKPOINT = RUN_DIR / "ball_segment" / "model1" / "weights" / "best.pt"
 DESTINATION = MODELS_DIR / "volleyball_ball.pt"
 
 
+def find_local_archive() -> Path | None:
+    """An already-downloaded copy of the archive, whatever it's called.
+
+    The Drive file is a zip but arrives named `.pt`, so an earlier manual
+    download can easily be sitting in models/ under a name this script
+    wouldn't recognise. Re-downloading 43 MB we already have is silly.
+    """
+    if not MODELS_DIR.is_dir():
+        return None
+    for candidate in sorted(MODELS_DIR.iterdir()):
+        if candidate.is_file() and zipfile.is_zipfile(candidate):
+            return candidate
+    return None
+
+
 def main() -> int:
     if DESTINATION.exists():
         print(f"{DESTINATION} already present; nothing to do.")
         return 0
 
     MODELS_DIR.mkdir(exist_ok=True)
+
+    # The run may already be extracted from a previous attempt.
+    if CHECKPOINT.exists():
+        print(f"Found an extracted checkpoint at {CHECKPOINT}.")
+        shutil.copy2(CHECKPOINT, DESTINATION)
+        print(f"\nReady: {DESTINATION}")
+        return 0
+
+    local = find_local_archive()
+    if local is not None and local != ARCHIVE:
+        print(f"Reusing already-downloaded archive {local}.")
+        ARCHIVE.write_bytes(local.read_bytes())
 
     if not ARCHIVE.exists():
         try:
