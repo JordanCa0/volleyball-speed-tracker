@@ -61,10 +61,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ball-max-aspect", type=float, default=1.6,
                         help="reject ball candidates less square than this "
                              "long/short side ratio (0 disables)")
+    parser.add_argument("--ball-select", choices=("static", "centroid"),
+                        default="static",
+                        help="how to pick the ball among candidates: 'static' "
+                             "drops things that never move then takes the most "
+                             "confident; 'centroid' is the original Roboflow "
+                             "filter (kept for comparison)")
+    parser.add_argument("--static-window", type=int, default=25,
+                        help="frames of history used to judge whether a "
+                             "candidate is stationary")
+    parser.add_argument("--static-radius", type=float, default=18.0,
+                        help="a candidate counts as stationary if it keeps "
+                             "reappearing within this many pixels")
+    parser.add_argument("--static-min-hits", type=int, default=6,
+                        help="how many past sightings inside --static-radius "
+                             "mark a candidate as stationary")
     parser.add_argument("--buffer-size", type=int, default=10,
-                        help="frames of candidate history for the ball filter; "
-                             "lower follows a fast ball better, higher rejects "
-                             "more false positives")
+                        help="frames of candidate history for the centroid "
+                             "strategy; lower follows a fast ball better, "
+                             "higher rejects more false positives")
     parser.add_argument("--trail-length", type=int, default=5,
                         help="frames of ball trail to draw")
     parser.add_argument("--no-slice", action="store_true",
@@ -110,11 +125,18 @@ def main() -> None:
             max_side_px=args.ball_max_size or None,
             max_aspect=args.ball_max_aspect or None,
         )
-        ball_tracker = BallTracker(buffer_size=args.buffer_size)
+        ball_tracker = BallTracker(
+            buffer_size=args.buffer_size,
+            strategy=args.ball_select,
+            static_window=args.static_window,
+            static_radius=args.static_radius,
+            static_min_hits=args.static_min_hits,
+        )
         ball_annotator = BallAnnotator(radius=12, buffer_size=args.trail_length)
         mode = "full-frame" if args.no_slice else "2x2 sliced"
         weights = "fine-tuned" if ball_backend.is_finetuned else "stock COCO"
-        print(f"ball:    {args.ball_model} ({weights}), {mode}, conf={args.ball_conf}")
+        print(f"ball:    {args.ball_model} ({weights}), {mode}, "
+              f"conf={args.ball_conf}, select={args.ball_select}")
 
     player_detector = player_tracker = player_annotator = None
     if not args.no_players:

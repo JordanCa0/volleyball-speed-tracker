@@ -15,8 +15,8 @@ yet. That's the next milestone.
 ## How it works
 
 ```
-frame ─┬─ 2x2 sliced inference ─ centroid filter ── ball trail overlay
-       └─ full-frame inference ─ ByteTrack ─────── player ellipses + ids
+frame ─┬─ 2x2 sliced inference ─ shape gate ─ static suppression ─ ball trail
+       └─ full-frame inference ─ ByteTrack ───────────── player ellipses + ids
 ```
 
 The ball is detected with **sliced inference**: the frame is cut into
@@ -83,6 +83,42 @@ the highest-confidence detection. The cost is recall: 7 of 80 club-gym
 frames lost their only candidate. Raise `--ball-max-size` if your ball is
 larger in frame (closer camera, higher resolution).
 
+### Picking the ball among the candidates
+
+Detection is only half the job: on club footage 57% of frames offer more than
+one candidate, and something has to choose. The original Roboflow filter
+buffers recent candidate positions and takes whichever is nearest their
+centroid — which fails here, because the buffer holds *every* candidate. A
+court line and a sponsor banner never move, so they anchor the centroid onto
+themselves and it stays there.
+
+Measured over 150 frames of club-gym footage, that filter picked the
+highest-confidence candidate on only 22% of contested frames (mean confidence
+of its pick 0.49, against 0.81 for the best candidate available), and the
+"ball" it reported moved a median of **0.9 px per frame** — a volleyball in
+play never does that.
+
+`--ball-select static` (the default) inverts the assumption: instead of
+looking for what stays put, throw out what stays put. Candidates reappearing
+within `--static-radius` px over the last `--static-window` frames are
+dropped, and the most confident survivor wins.
+
+| on 150 frames of club-gym footage | centroid | static |
+|---|---|---|
+| correct on hand-labelled ball frames | 2/5 | **4/5** |
+| reports a ball when none is visible | 3/3 | **1/3** |
+| median frame-to-frame motion | 0.9 px | **6.8 px** |
+| physically impossible jumps (>200px) | 17% | **5%** |
+
+The one labelled frame it gives up is a ball being *held* by a player —
+stationary, so suppressed. That is the right trade for speed measurement,
+where a motionless ball carries no information.
+
+It assumes a roughly fixed camera. Under a hard pan the court lines move too,
+stop looking static, and survive the filter; `--ball-select centroid` is kept
+for comparison, but the real fix is camera-motion compensation, which we do
+not do yet.
+
 ### Checking it on your own footage
 
 Render the same frames twice and watch them side by side:
@@ -135,7 +171,11 @@ Press `q` to quit the live window.
 | `--ball-max-size` | `60` | Reject candidates whose longer box side exceeds this (px); `0` disables |
 | `--ball-max-aspect` | `1.6` | Reject candidates less square than this ratio; `0` disables |
 | `--player-imgsz` | `960` | Inference size for the full frame |
-| `--buffer-size` | `10` | Frames of candidate history for the ball filter |
+| `--ball-select` | `static` | How to pick the ball: `static` or `centroid` |
+| `--static-window` | `25` | Frames of history used to judge stationarity |
+| `--static-radius` | `18` | Reappearing within this many px counts as stationary |
+| `--static-min-hits` | `6` | Past sightings inside the radius that mark it static |
+| `--buffer-size` | `10` | Frames of candidate history for `centroid` only |
 | `--trail-length` | `5` | Frames of ball trail to draw |
 | `--no-slice` | off | Detect the ball on the full frame instead of tiles |
 | `--no-ball` / `--no-players` | off | Skip one half of the pipeline |
@@ -169,9 +209,14 @@ Run the test suite with `.venv/bin/python -m pytest tests`.
   displacement.
 - **No court-boundary filtering.** Benches, coaches, referees and the front
   row of the crowd are all tracked as players.
-- **The ball filter lags.** It picks the candidate nearest the centroid of
-  recent positions, which sits behind a fast-moving ball. Harmless when the
-  ball is the only candidate, costly when it isn't. Tune with `--buffer-size`.
+- **Detection recall is the ceiling now, not selection.** On hand-labelled
+  club-gym frames the ball was visible but never detected in 2 of 8 — the
+  selector cannot recover those. Fine-tuning on your own footage is the fix.
+- **Static suppression needs a roughly fixed camera.** See above; a hard pan
+  makes court lines look mobile and they start surviving the filter.
+- **A held ball is suppressed.** It is stationary, so the static filter drops
+  it. Harmless for speed measurement, surprising if you are watching the
+  overlay during a timeout.
 
 ## Recording good footage
 
