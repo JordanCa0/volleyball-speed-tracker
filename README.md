@@ -47,8 +47,12 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python webapp.py
-# http://127.0.0.1:5000
+# http://127.0.0.1:8000        (--port to change)
 ```
+
+Port 8000 rather than Flask's usual 5000: on macOS the AirPlay Receiver in
+Control Center already listens on 5000, and Flask fails to bind there without
+saying anything useful.
 
 Upload a clip, watch the progress bar, get a table of peak speeds with a
 quality flag on each, plus CSV export and an annotated video. Analysis runs in

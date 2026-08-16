@@ -346,8 +346,21 @@ setInterval(refresh, 2000);
 """
 
 
-if __name__ == "__main__":
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Volleyball speed tracker web UI")
+    # Not 5000: on macOS the AirPlay Receiver in Control Center already listens
+    # there, and Flask fails to bind with no useful message.
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="127.0.0.1")
+    args = parser.parse_args()
+
     UPLOADS.mkdir(exist_ok=True)
     OUTPUTS.mkdir(exist_ok=True)
-    print("Volleyball Speed Tracker — http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    print(f"Volleyball Speed Tracker — http://{args.host}:{args.port}")
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
