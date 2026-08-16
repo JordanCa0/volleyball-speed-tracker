@@ -11,12 +11,14 @@ from tracking.trackers import BallTracker
 
 
 def detections(*items):
-    """Build detections from (x, y, confidence) triples, 20px boxes."""
+    """Build detections from (x, y, confidence) or (x, y, confidence, radius)."""
     if not items:
         return sv.Detections.empty()
     xyxy, confidence = [], []
-    for x, y, conf in items:
-        xyxy.append([x - 10, y - 10, x + 10, y + 10])
+    for item in items:
+        x, y, conf = item[:3]
+        r = item[3] if len(item) > 3 else 10.0
+        xyxy.append([x - r, y - r, x + r, y + r])
         confidence.append(conf)
     return sv.Detections(xyxy=np.array(xyxy, dtype=float),
                          confidence=np.array(confidence, dtype=float))
@@ -52,6 +54,31 @@ def test_static_false_positive_is_rejected_in_favour_of_the_ball():
     assert len(result) == 1
     assert centre_of(result) == pytest.approx([400, 400]), \
         "picked the stationary banner over the moving ball"
+
+
+def test_receding_ball_is_not_mistaken_for_furniture():
+    """Filming from behind the server, the ball shrinks instead of moving.
+
+    Position-only staticness threw away 86% of real detections on end-on
+    footage, because a ball flying away holds nearly the same image position
+    for its whole flight. Shrinking is what distinguishes it from a banner.
+    """
+    tracker = BallTracker(static_min_hits=6, static_window=25)
+    radius = 22.0
+    kept = 0
+    for _ in range(20):
+        radius *= 0.93                      # receding, ~7% smaller each frame
+        result = tracker.update(detections((900, 400, 0.8, radius)))
+        kept += len(result)
+    assert kept >= 18, f"suppression ate the receding ball ({kept}/20 kept)"
+
+
+def test_fixed_size_at_fixed_position_is_still_suppressed():
+    """The size test must not defeat the original purpose."""
+    tracker = BallTracker(static_min_hits=6)
+    for _ in range(10):
+        tracker.update(detections((500, 200, 0.9, 14.0)))
+    assert len(tracker.update(detections((500, 200, 0.9, 14.0)))) == 0
 
 
 def test_everything_static_reports_nothing():

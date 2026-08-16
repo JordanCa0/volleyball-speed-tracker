@@ -11,6 +11,13 @@ __pycache__/
 # Fetched models, including the extracted training run (see fetch_models.py)
 models/
 
+# Web UI working directories (uploaded clips and annotated renders)
+uploads/
+outputs/
+
+# Source footage
+input_videos/
+
 # Video footage and annotated outputs (large binaries; keep out of git)
 *.mp4
 *.mov

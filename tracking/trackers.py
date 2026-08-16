@@ -47,7 +47,7 @@ class BallTracker:
 
     def __init__(self, buffer_size: int = 10, strategy: str = "static",
                  static_window: int = 25, static_radius: float = 18.0,
-                 static_min_hits: int = 6):
+                 static_min_hits: int = 6, static_size_tol: float = 0.15):
         if strategy not in ("static", "centroid"):
             raise ValueError(f"unknown ball selection strategy: {strategy}")
         self.strategy = strategy
@@ -55,27 +55,48 @@ class BallTracker:
         self.history: deque[np.ndarray] = deque(maxlen=static_window)
         self.static_radius = static_radius
         self.static_min_hits = static_min_hits
+        self.static_size_tol = static_size_tol
 
-    def _static_mask(self, xy: np.ndarray) -> np.ndarray:
-        """True for candidates that keep turning up in the same spot."""
+    def _static_mask(self, points: np.ndarray) -> np.ndarray:
+        """True for candidates that keep turning up unchanged.
+
+        "Unchanged" means both position *and* apparent size, and the size half
+        is not optional. Filming from behind the server, a ball flying away
+        holds almost the same image position for its whole flight — it shrinks
+        rather than moves. Position-only staticness cannot tell that from a
+        sponsor banner, and duly threw away 86% of the real detections on
+        end-on footage. A banner holds its size; a receding ball does not.
+        """
         if not self.history:
-            return np.zeros(len(xy), dtype=bool)
+            return np.zeros(len(points), dtype=bool)
         past = np.concatenate(list(self.history))
         if len(past) == 0:
-            return np.zeros(len(xy), dtype=bool)
-        hits = (np.linalg.norm(past[None, :, :] - xy[:, None, :], axis=2)
-                < self.static_radius).sum(axis=1)
-        return hits >= self.static_min_hits
+            return np.zeros(len(points), dtype=bool)
 
-    def _select_static(self, xy: np.ndarray,
+        close = (np.linalg.norm(past[None, :, :2] - points[:, None, :2], axis=2)
+                 < self.static_radius)
+        radii, past_radii = points[:, 2][:, None], past[:, 2][None, :]
+        scale = np.maximum(np.maximum(radii, past_radii), 1e-6)
+        same_size = np.abs(past_radii - radii) / scale <= self.static_size_tol
+        return (close & same_size).sum(axis=1) >= self.static_min_hits
+
+    @staticmethod
+    def _points(detections: sv.Detections, xy: np.ndarray) -> np.ndarray:
+        """(x, y, radius) per candidate — the state staticness is judged on."""
+        widths = detections.xyxy[:, 2] - detections.xyxy[:, 0]
+        heights = detections.xyxy[:, 3] - detections.xyxy[:, 1]
+        radii = np.maximum(widths, heights) / 2.0
+        return np.column_stack([xy, radii])
+
+    def _select_static(self, points: np.ndarray,
                        detections: sv.Detections) -> int | None:
-        moving = ~self._static_mask(xy)
+        moving = ~self._static_mask(points)
         if not moving.any():
             # Everything on screen is furniture; better to report nothing than
             # to report a banner.
             return None
         confidence = (detections.confidence if detections.confidence is not None
-                      else np.ones(len(xy)))
+                      else np.ones(len(points)))
         scores = np.where(moving, confidence, -1.0)
         return int(np.argmax(scores))
 
@@ -88,15 +109,16 @@ class BallTracker:
         self.buffer.append(xy)
 
         if len(detections) == 0:
-            self.history.append(xy)
+            self.history.append(np.zeros((0, 3)))
             return detections
 
+        points = self._points(detections, xy)
         if self.strategy == "centroid":
             index = self._select_centroid(xy)
         else:
-            index = self._select_static(xy, detections)
+            index = self._select_static(points, detections)
 
-        self.history.append(xy)
+        self.history.append(points)
         if index is None:
             return detections[np.zeros(len(detections), dtype=bool)]
         return detections[[index]]

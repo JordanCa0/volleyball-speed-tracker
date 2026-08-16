@@ -63,35 +63,57 @@ same Detector/Tracker/SpeedEngine code that M3 wires up to a live window.
 These constraints are physics, not implementation choices — they bound what
 any single-camera design can measure and drive the setup wizard (§6.3).
 
-### 3.1 Placement (documented user guidance + wizard defaults)
+### 3.1 Placement (end-on; documented user guidance)
 
-- **Angle:** lens perpendicular to the flight path (side-on). A 2D camera
-  only measures the velocity component parallel to its image plane;
-  measured speed = true speed × cos(θ), where θ is the angle between the
-  flight direction and the image plane. Within ±15° of perpendicular the
-  cosine error stays under ~3.5%; at 30° it's already 13% — over the whole
-  ±10% accuracy budget. Camera behind the server is unusable.
-- **Position:** on the sideline, roughly level with the mid-height of the
-  flight path (tripod ~1.5–2.5 m), 6–10 m back — far enough to frame the
-  whole flight and flatten perspective, close enough that the ball stays
-  ≥ `min_radius_px` for detection.
-- **Distance trade-off:** farther camera → smaller depth error (§3.2) and
-  full flight in frame, but fewer pixels on the ball. Wizard should preview
-  detected ball radius so the user can verify it's above threshold.
+**v0.4 reverses v0.3 on this point.** The previous version required a side-on
+camera and called "behind the server" unusable. Field reality overruled it:
+most gyms have no sideline space for a tripod, and users film from behind the
+server. The verdict was true of the *method* v0.3 assumed (one fixed
+metres-per-pixel scale applied to pixel displacement), not of the camera
+position — so the method changed instead.
 
-### 3.2 Measurement corridor (single-camera depth limitation)
+- **Angle:** behind the server, looking down the flight path. This is the
+  worst possible geometry for measuring pixel displacement and the *best* for
+  measuring apparent size, which is what §6.3 now uses. A ball flying away
+  barely moves across the frame but shrinks steadily and measurably.
+- **Position:** behind the endline, ideally raised enough that the server's
+  body does not occlude the ball at contact. Tripod strongly preferred —
+  static-candidate rejection (§6.1) assumes a roughly fixed camera.
+- **Distance trade-off:** the ball must stay resolvable at the far end of its
+  flight. On reference footage it spans 12–31 px across a rally; below roughly
+  10 px the radius estimate degrades faster than the fit can absorb.
 
-The px→m scale is calibrated at one distance from the camera. A ball flying
-a lane Δd closer/farther than the calibration plane reads fast/slow by
-roughly D/(D∓Δd) (camera distance D). At D = 8 m, a 1 m lane drift is ~14%
-error; at D = 12 m, ~9%. Consequences, documented for v1:
+### 3.2 Depth is measured, not assumed
 
-- Accuracy holds in a **corridor around the calibrated lane** (~±0.5–1 m
-  depending on D), not across the whole court. Users should have players
-  hit from roughly the same lane — consistent with radar-gun workflows.
-- Homography (F8, M4) removes this for position *on the court plane* by
-  computing per-position scale; it still does not recover true depth-axis
-  velocity (PRD §7 known limitation stands).
+The v0.3 "measurement corridor" is **gone**. It existed because a single fixed
+scale is only correct at one distance, so a ball flying a lane 1 m off the
+calibrated plane read ~14% wrong at 8 m. Depth is now recovered per frame from
+the ball's known 21 cm diameter (§6.3), so the ball may fly any lane.
+
+What replaces it is a different error budget, driven by how precisely the
+ball's apparent radius can be measured. Since `Z = f·D/w`, **fractional depth
+error equals fractional radius error**. Measured on reference end-on footage:
+
+| radius estimator | frame-to-frame noise | speed error at 12 m |
+|---|---|---|
+| **bounding-box max side** | **3.2%** | **±0.68 m/s (2.7%)** |
+| segmentation mask area | 11.7% | ±2.51 m/s (10.0%) |
+| mask minor axis | 20.3% | ±4.35 m/s (17.4%) |
+
+The bounding box wins decisively, despite the mask being the more
+sophisticated-looking option — this is why `analysis.ball_radius_px` uses the
+box and the segmentation masks go unused.
+
+Two properties keep this workable:
+
+- **Constant bias cancels.** The box is not the ball's true silhouette, but
+  calibration measures a reference ball through the *same* estimator, so any
+  systematic scale factor divides out. Calibration and measurement must never
+  use different estimators.
+- **Noise averages down.** Per-frame depth error at 10 m is ~30 cm, comparable
+  to how far the ball moves between frames at 30 fps — so frame-to-frame
+  differencing is hopeless. Fitting the whole flight and taking the slope
+  reduces the error by √N (§6.4).
 
 ### 3.3 Multi-hit / multi-ball behavior
 
@@ -105,17 +127,21 @@ workflow.
 
 | File | Responsibility | PRD refs |
 |---|---|---|
-| `capture.py` | Threaded frame grab (camera or file), capture-time stamping, 1-frame buffer | F6 |
-| `detector.py` | HSV mask ∧ background-subtraction mask → `Detection` per frame | F1, F9 (future) |
-| `tracker.py` | Frame-to-frame association, occlusion tolerance, motion trail | F2 |
-| `calibration.py` | Court-line two-point scale (default), ball-diameter fallback, homography (F8 later); persists to config | F3, F5, F8 |
-| `setup_wizard.py` | Guided setup flow: framing preview → court-line clicks → color calibration → AE/AWB lock → save | F5 |
-| `hsv_calibrate.py` | *(exists)* interactive HSV tuner, invoked as the color step of the wizard | F5 |
-| `speed.py` | Live finite-difference readout + trajectory-fit peak, hit segmentation | F3, F4 |
-| `overlay.py` | Draws detection, trail, speed readout on frame | F4 |
-| `session_log.py` | In-memory hit log + CSV export | F7 |
-| `main.py` | Entrypoints: `--setup` (wizard), live mode, `--source <file>` replay | F4, F6 |
-| `config.json` | *(exists)* camera index, HSV bounds, scale calibration, ball diameter, min radius | — |
+| `webapp.py` | Flask upload UI, background job queue, CSV/video download | F6, F7 |
+| `analysis.py` | End-to-end clip → `AnalysisResult`; the one path both front ends use | F1, F3, F6 |
+| `track.py` | CLI: tracking, `--speed`, `--calibrate` | F4, F6 |
+| `tracking/detectors.py` | Sliced YOLO inference + shape gate → candidates per frame | F1, F9 |
+| `tracking/trackers.py` | Ball selection (static suppression), player ByteTrack | F2 |
+| `tracking/annotators.py` | Ball trail and player overlays | F4 |
+| `calibration.py` | Camera intrinsics; depth from apparent ball size; persists to config | F3, F5 |
+| `speed.py` | 3D trajectory fit, flight segmentation, per-hit peak | F3, F4 |
+| `config.json` | *(exists)* camera intrinsics, ball diameter | — |
+
+Superseded from v0.3: `detector.py` (HSV) became `tracking/detectors.py` (YOLO),
+so `hsv_calibrate.py` and the colour-calibration wizard step are gone —
+F9 arrived early and F5's colour tuning became unnecessary. `setup_wizard.py`
+collapses to a single `--calibrate` invocation now that there are no court
+clicks to collect.
 
 Flat module layout — the project is small enough that a `src/` tree would be
 premature.
@@ -124,29 +150,36 @@ premature.
 
 ```python
 @dataclass
-class Detection:
+class BallSample:
     frame_idx: int
-    timestamp: float        # seconds, monotonic clock at grab time
+    timestamp: float        # seconds; file mode derives it from frame index
     center_px: tuple[float, float]
-    radius_px: float
+    radius_px: float        # the depth cue — see §3.2 on which estimator
+    confidence: float
 
-@dataclass
-class TrackPoint:
-    detection: Detection | None   # None = gap frame (occlusion/miss)
+@dataclass(frozen=True)
+class CameraIntrinsics:
+    focal_px: float
+    principal_x: float
+    principal_y: float
+    ball_diameter_m: float = 0.21
+    # depth_m(radius_px) and to_world(center_px, radius_px) -> (X, Y, Z)
 
 @dataclass
 class Hit:
     start_time: float
     end_time: float
-    peak_speed_kmh: float   # from trajectory fit (§6.4)
+    peak_speed_kmh: float   # from the 3D trajectory fit (§6.4)
     samples: list[float]    # instantaneous speeds, for CSV/debugging
-
-@dataclass
-class ScaleCalibration:
-    method: Literal["court_line", "ball_diameter"]
-    meters_per_px: float           # court_line: fixed for session
-    reference_points_px: list[tuple[float, float]]  # reusable for F8 homography
+    n_points: int           # fit support
+    mean_depth_m: float
+    truncated: bool         # ball left frame / track lost mid-flight
+    # .reliable == n_points >= 8 and not truncated
 ```
+
+`Hit.reliable` exists because a quadratic through five points fits anything;
+the peak it reports is then a property of the noise. A reading that cannot be
+trusted must say so rather than sit in the table looking like the others.
 
 ## 6. Algorithms
 
@@ -193,36 +226,50 @@ F9 (YOLO) remains a drop-in `Detector` replacement later — not v1.
   converted to px/frame via current scale. Distant same-color blobs still
   fail this test; legal hits always pass.
 
-### 6.3 Setup Wizard & Scale Calibration (F3, F5)
+### 6.3 Camera Calibration (F3, F5)
 
-`main.py --setup` runs a guided flow (per PRD's 2-minute setup goal):
+One measurement, once per device, never repeated:
 
-1. **Framing preview:** live feed with guidance overlay ("place camera
-   side-on to the flight path"; §3.1 text). Shows detected-ball radius so
-   the user can confirm the ball is large enough at this distance.
-2. **Court-line scale calibration (v1 default):** user clicks two points a
-   known real distance apart. Court geometry is standardized, so the wizard
-   offers presets: attack line → center line along the sideline (exactly
-   3.00 m), half-court sideline (9.00 m), net height (2.43 m / 2.24 m) for
-   a vertical reference. Custom distance also allowed (any marked span).
-   Clicked points are persisted; collecting ≥ 4 court points here later
-   feeds F8 homography directly with no new UX.
-3. **Color calibration:** existing `hsv_calibrate.py` flow.
-4. **Lock AE/AWB** (§6.1) and save everything to `config.json`.
+```bash
+track.py --source reference.mp4 --calibrate <radius_px> <distance_m>
+```
 
-Scale methods, in order of preference:
+Film the ball held at a measured distance, read off its apparent radius, and
+`focal_length_from_reference` inverts `Z = f·D/(2r)` to get `focal_px`. The
+principal point is assumed to be the frame centre — an offset of a few pixels
+moves the lateral estimate by millimetres at these distances. Result is saved
+to `config.json`.
 
-- **Court-line two-point (default):** fixed meters-per-pixel from large,
-  stationary references. Accurate within the measurement corridor (§3.2).
-- **Ball-diameter (fallback,** e.g. no visible lines — backyard/beach):
-  demoted from v0.1's per-frame default. Per-frame `radius_px` is noisy
-  (±1–2 px on a 10–25 px radius is a 5–15% scale error) and motion blur
-  elongates the ball exactly at peak speed, inflating apparent radius. If
-  used, take the **median radius over the slow early portion of the
-  track** (or a stationary pre-hit frame) and hold it fixed per hit —
-  never per-frame at speed.
-- **Homography (F8, M4):** per-position scale from ≥ 4 court points;
-  removes the corridor restriction for on-court-plane motion.
+No court markings are needed, which matters: the previous design required
+clicking court lines, and half the point of the end-on view is that it works
+in a gym where you cannot see or reach useful lines.
+
+**The estimator must match.** Calibration and measurement both go through
+`analysis.ball_radius_px`. The bounding box is not the ball's true silhouette,
+so it carries a systematic bias — which cancels exactly, and only if both ends
+measure the same way. Mixing estimators would put that bias straight into
+every distance.
+
+Fallback: `focal_length_from_fov` assumes a 70° horizontal field of view when
+no calibration exists. Speeds then scale linearly with the true focal length,
+so they are indicative and the UI labels them as such.
+
+### 6.3a Ball Selection (F1)
+
+Candidates come from sliced YOLO inference plus a shape gate (`--ball-max-size`,
+`--ball-max-aspect`). Choosing among them uses **static suppression**: a
+candidate reappearing at the same position *and the same apparent size* over
+the last `static_window` frames is furniture, and the most confident survivor
+wins.
+
+Both halves of that test are load-bearing. Position alone was tried first and
+discarded: filming from behind the server, a ball flying away holds nearly the
+same image position for its whole flight, so a position-only rule threw away
+86% of real detections on end-on footage. A net pole holds its size; a
+receding ball does not.
+
+This replaced Roboflow's centroid filter, which buffered every candidate and
+so got anchored onto exactly the static objects it was meant to reject.
 
 ### 6.4 Speed Calculation (F3, F4)
 
@@ -230,14 +277,24 @@ Two outputs with different jobs:
 
 - **Live readout** (overlay, latency-critical): finite difference between
   consecutive detections, median-of-3 smoothed. Jittery but immediate.
-- **Peak speed per hit** (the headline number, PRD Q2): **trajectory fit.**
-  Raw per-frame speeds carry pixel-jitter noise, and max-of-noisy-samples
-  is biased high — every peak would over-report by the luckiest upward
-  jitter. Instead, fit a low-order polynomial to x(t), y(t) over the hit
-  window (in-flight paths are near-ballistic, so quadratic fits well),
-  differentiate the fit, and take its maximum. Fit incrementally as samples
-  arrive so the readout still lands within the PRD's 1-second latency;
-  finalize on hit end. ~10 lines of `numpy.polyfit`.
+- **Peak speed per hit** (the headline number, PRD Q2): **3D trajectory fit.**
+  Every sample is lifted to `(X, Y, Z)` metres via `intrinsics.to_world`, then
+  a quadratic is fitted to each axis over the flight, differentiated, and the
+  maximum magnitude taken. Raw per-frame speeds carry jitter, and
+  max-of-noisy-samples is biased high — every peak would over-report by the
+  luckiest upward jitter.
+
+  Fitting is not merely a de-biasing nicety here, it is what makes the
+  measurement possible at all. Per-frame depth error at 10 m is roughly 30 cm,
+  comparable to how far the ball travels between frames at 30 fps, so a single
+  frame pair carries almost no signal. Fitting ~15 of them cuts the error by
+  √N to about ±0.7 m/s.
+
+**Depth is the noisy axis, and it is quarantined.** Radius is median-smoothed
+before becoming depth, and every *segmentation* decision — open, close, split —
+runs on image-plane motion, which is precise. Only the reported speed uses
+depth. A noisy Z must never be allowed to fabricate a "contact" that splits a
+good flight in half.
 
 Both use **actual grab timestamps** (monotonic clock stamped in the capture
 thread, §6.6), never assumed-fixed fps — buffered or dropped frames
@@ -332,18 +389,23 @@ track/speed < 1 ms, overlay+imshow ~5–10 ms — headroom remains for
 
 ## 9. Risks Carried Into Implementation
 
-- **False positive tracks** (PRD R1): now double-mitigated — motion∧color
-  detection (§6.1) and max-speed gating (§6.2). YOLO (F9) remains the
-  escape hatch behind the `Detector` interface if M1 footage still shows
-  false tracks.
-- **Undersampling fast hits** (PRD R2): timestamp-true speed math degrades
-  gracefully, but whether 30 fps detection survives >100 km/h motion blur
-  is answered empirically in M2 with slo-mo-vs-30fps comparisons of the
-  same hits.
-- **Measurement corridor** (§3.2): a *usage* constraint, not a bug —
-  documented in setup guidance; homography (M4) relaxes it.
-- **Depth-axis motion**: out of scope for v1 accuracy (PRD §7); no
-  single-camera fix planned.
+- **Detection recall is the binding constraint.** The ball is sometimes
+  plainly visible and simply not detected, and nothing downstream recovers
+  that. Fine-tuning on end-on footage — weighted toward far range, with hard
+  negatives for net poles, banners and scoreboards — is the fix.
+- **Radius noise sets the accuracy floor** (§3.2). Depth error equals radius
+  error, so any change to the detector or the estimator changes the error
+  budget and must be re-measured, not assumed.
+- **Motion blur** inflates apparent radius exactly at peak speed, which biases
+  depth *low* at the moment we care most. Elongation measured at a median 1.13
+  on reference footage, so the effect is small there — but it grows with ball
+  speed and is the first thing to check on genuinely fast serves.
+- **Undersampling fast hits** (PRD R2): at 30 fps a half-second flight is only
+  ~15 samples. 60–120 fps is the cheapest available improvement.
+- **Static suppression assumes a fixed camera** (§6.3a). A hard pan makes
+  static objects move, and they start surviving the filter.
+- **False positives that move** — a thrown second ball, a light on a moving
+  surface — defeat every filter here. Only a better detector helps.
 
 ## 10. Explicitly Deferred (matches PRD non-goals)
 

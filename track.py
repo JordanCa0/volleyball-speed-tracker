@@ -20,11 +20,15 @@ Keys: 'q' = quit.
 from __future__ import annotations
 
 import argparse
+import json
 import time
+from pathlib import Path
 
 import cv2
 import supervision as sv
 
+from analysis import analyse_video
+from calibration import focal_length_from_reference, load_from_config, save_to_config
 from tracking.detectors import (
     PERSON_CLASS_ID,
     SPORTS_BALL_CLASS_ID,
@@ -92,6 +96,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", help="torch device, e.g. mps / cuda / cpu")
     parser.add_argument("--save", metavar="OUT.mp4", help="write annotated video here")
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--speed", action="store_true",
+                        help="measure ball speed instead of just drawing: "
+                             "recovers depth from the ball's apparent size and "
+                             "reports a peak speed per flight segment")
+    parser.add_argument("--calibrate", nargs=2, type=float,
+                        metavar=("RADIUS_PX", "DISTANCE_M"),
+                        help="fit the camera focal length from a ball of known "
+                             "apparent radius at a known distance, save to "
+                             "config.json, and exit")
+    parser.add_argument("--config", default="config.json",
+                        help="where camera intrinsics are stored")
     return parser
 
 
@@ -108,8 +123,73 @@ def open_source(source: str) -> tuple[cv2.VideoCapture, sv.VideoInfo]:
     return capture, sv.VideoInfo(width=width, height=height, fps=fps, total_frames=total)
 
 
+def run_calibration(args) -> None:
+    """Fit and persist the focal length from one reference measurement."""
+    radius_px, distance_m = args.calibrate
+    capture, video_info = open_source(args.source)
+    capture.release()
+    intrinsics = focal_length_from_reference(
+        radius_px, distance_m, (video_info.width, video_info.height))
+
+    path = Path(args.config)
+    config = json.loads(path.read_text()) if path.exists() else {}
+    path.write_text(json.dumps(save_to_config(intrinsics, config), indent=2))
+
+    print(f"focal length: {intrinsics.focal_px:.1f} px "
+          f"(from r={radius_px}px at {distance_m}m)")
+    print(f"saved to {path}")
+
+
+def run_speed(args) -> None:
+    """Measure speed rather than just drawing the ball."""
+    path = Path(args.config)
+    config = json.loads(path.read_text()) if path.exists() else {}
+    intrinsics = load_from_config(config)
+    if intrinsics is None:
+        print("no calibration found — falling back to an assumed 70° field of "
+              "view. Speeds are indicative only; run --calibrate for real "
+              "numbers.")
+
+    result = analyse_video(
+        args.source, intrinsics=intrinsics, ball_model=args.ball_model,
+        confidence=args.ball_conf, imgsz=args.ball_imgsz,
+        max_side_px=args.ball_max_size or None,
+        max_aspect=args.ball_max_aspect or None,
+        slice_inference=not args.no_slice, max_frames=args.max_frames,
+        device=args.device, annotate_path=args.save,
+        progress=lambda n, total: print(f"  {n}/{total or '?'} frames", flush=True)
+        if n % 100 == 0 else None,
+    )
+
+    print()
+    print(result.summary())
+    print(f"scale source: {result.intrinsics_source}")
+    if not result.hits:
+        print("\nno flight segments found")
+        return
+    print(f"\n{'#':>3}  {'start':>7}  {'peak km/h':>9}  {'mph':>6}  "
+          f"{'pts':>4}  {'depth m':>7}  note")
+    for i, hit in enumerate(result.hits, 1):
+        note = "" if hit.reliable else ("truncated" if hit.truncated else "short")
+        print(f"{i:>3}  {hit.start_time:>6.2f}s  {hit.peak_speed_kmh:>9.1f}  "
+              f"{hit.peak_speed_kmh*0.621371:>6.1f}  {hit.n_points:>4}  "
+              f"{hit.mean_depth_m:>7.1f}  {note}")
+    if result.fastest:
+        print(f"\nfastest: {result.fastest.peak_speed_kmh:.1f} km/h "
+              f"({result.fastest.peak_speed_kmh*0.621371:.1f} mph)")
+    if args.save:
+        print(f"wrote {args.save}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
+    if args.calibrate:
+        run_calibration(args)
+        return
+    if args.speed:
+        run_speed(args)
+        return
+
     capture, video_info = open_source(args.source)
     print(f"source: {args.source}  {video_info.width}x{video_info.height} "
           f"@ {video_info.fps:.2f}fps  frames={video_info.total_frames}")

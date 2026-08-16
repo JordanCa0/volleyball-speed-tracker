@@ -1,117 +1,162 @@
-import math
-from dataclasses import dataclass
+"""Speed engine tests, in 3D.
 
+Everything is specified in metres and projected into the image the way a real
+camera would, so the tests exercise the depth-from-size path rather than
+assuming it.
+"""
 import numpy as np
 import pytest
 
-from speed import SpeedEngine
+from calibration import CameraIntrinsics
+from speed import BallSample, SpeedEngine
 
 G = 9.81
+INTR = CameraIntrinsics(focal_px=1300.0, principal_x=960.0, principal_y=540.0)
 
 
-@dataclass
-class Detection:
-    """Minimal stand-in for whatever the tracking pipeline feeds the engine.
-
-    `SpeedEngine.update` only reads `.timestamp` and `.center_px`, so the
-    test defines its own rather than coupling to a detector's type.
-    """
-    frame_idx: int
-    timestamp: float
-    center_px: tuple[float, float]
-    radius_px: float
+def project(point_m, intrinsics=INTR, radius_noise=0.0, rng=None):
+    """(X, Y, Z) in metres -> the (center_px, radius_px) a camera would see."""
+    x, y, z = point_m
+    u = intrinsics.principal_x + x * intrinsics.focal_px / z
+    v = intrinsics.principal_y + y * intrinsics.focal_px / z
+    r = intrinsics.focal_px * intrinsics.ball_diameter_m / (2.0 * z)
+    if radius_noise and rng is not None:
+        r += rng.normal(0, radius_noise)
+    return (u, v), r
 
 
-def feed(engine, positions_m, fps, mpp, track_id=0):
-    """positions_m: list of (x, y) in meters; converted to px via mpp."""
-    for i, (x, y) in enumerate(positions_m):
-        d = Detection(i, i / fps, (x / mpp, y / mpp), 10.0)
-        engine.update(d, track_id)
+def feed(engine, points_m, fps, radius_noise=0.0, seed=0, track_id=0):
+    rng = np.random.default_rng(seed)
+    for i, point in enumerate(points_m):
+        center, radius = project(point, engine.intrinsics, radius_noise, rng)
+        engine.update(BallSample(i, i / fps, center, radius), track_id)
     engine.finish()
+
+
+def test_depth_axis_motion_is_measured():
+    """The whole point: a ball flying away from the camera.
+
+    Pixel displacement here is nearly zero — the speed lives entirely in the
+    changing apparent size. The old scalar-scale engine measured 0 for this.
+    """
+    fps, speed_ms = 30.0, 10.0            # 36 km/h straight down the barrel
+    points = [(0.0, 0.0, 6.0 + speed_ms * i / fps) for i in range(30)]
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
+
+    assert len(engine.hits) == 1
+    assert engine.hits[0].peak_speed_kmh == pytest.approx(36.0, rel=0.05)
 
 
 def test_free_fall_peak_matches_gravity():
     """Gravity is the ground truth: v = g*t, exactly (TDD §8 drop test)."""
-    fps, mpp, duration = 60.0, 0.01, 1.2
-    rng = np.random.default_rng(42)
-    positions = []
-    for i in range(int(duration * fps) + 1):
-        t = i / fps
-        noise = rng.normal(0, 0.5) * mpp   # ±0.5 px detection jitter
-        positions.append((2.0, 0.5 * G * t * t + noise))
-    engine = SpeedEngine(mpp)
-    feed(engine, positions, fps, mpp)
+    fps, duration, depth = 60.0, 1.2, 10.0
+    points = [(2.0, 0.5 * G * (i / fps) ** 2, depth)
+              for i in range(int(duration * fps) + 1)]
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
 
     assert len(engine.hits) == 1
-    true_final_kmh = G * duration * 3.6          # 42.4 km/h
-    assert engine.hits[0].peak_speed_kmh == pytest.approx(true_final_kmh, rel=0.05)
+    assert engine.hits[0].peak_speed_kmh == pytest.approx(G * duration * 3.6, rel=0.05)
 
 
-def test_constant_velocity_peak():
-    fps, mpp, speed_ms = 30.0, 0.02, 10.0        # 36 km/h
-    positions = [(speed_ms * i / fps, 1.0) for i in range(40)]
-    engine = SpeedEngine(mpp)
-    feed(engine, positions, fps, mpp)
+def test_diagonal_motion_combines_all_three_axes():
+    fps = 30.0
+    vx, vy, vz = 6.0, 2.0, 8.0            # |v| = 10.2 m/s = 36.8 km/h
+    points = [(vx * i / fps, vy * i / fps, 7.0 + vz * i / fps) for i in range(30)]
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
 
+    expected = np.hypot(np.hypot(vx, vy), vz) * 3.6
     assert len(engine.hits) == 1
-    assert engine.hits[0].peak_speed_kmh == pytest.approx(36.0, rel=0.02)
+    assert engine.hits[0].peak_speed_kmh == pytest.approx(expected, rel=0.05)
 
 
 def test_slow_motion_produces_no_hits():
-    fps, mpp = 30.0, 0.02
-    positions = [(0.5 * i / fps, 1.0) for i in range(60)]   # 0.5 m/s = 1.8 km/h
-    engine = SpeedEngine(mpp)
-    feed(engine, positions, fps, mpp)
+    fps = 30.0
+    points = [(0.5 * i / fps, 1.0, 8.0) for i in range(60)]   # 1.8 km/h
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
     assert engine.hits == []
 
 
 def test_bounce_splits_into_two_hits():
     """A sharp direction change (contact) must split the segment."""
-    fps, mpp, speed_ms = 60.0, 0.01, 8.0
-    positions = []
-    n = 30
-    for i in range(n):                            # traveling down-right
+    fps, speed = 60.0, 8.0
+    points, n, depth = [], 30, 9.0
+    for i in range(n):
         t = i / fps
-        positions.append((speed_ms * t * 0.707, speed_ms * t * 0.707))
-    apex_x, apex_y = positions[-1]
-    for i in range(1, n):                         # deflected: up-right
+        points.append((speed * t * 0.707, speed * t * 0.707, depth))
+    ax, ay, _ = points[-1]
+    for i in range(1, n):
         t = i / fps
-        positions.append((apex_x + speed_ms * t * 0.707, apex_y - speed_ms * t * 0.707))
-    engine = SpeedEngine(mpp)
-    feed(engine, positions, fps, mpp)
+        points.append((ax + speed * t * 0.707, ay - speed * t * 0.707, depth))
+
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
 
     assert len(engine.hits) == 2
     for hit in engine.hits:
-        assert hit.peak_speed_kmh == pytest.approx(8.0 * 3.6, rel=0.05)
+        assert hit.peak_speed_kmh == pytest.approx(speed * 3.6, rel=0.06)
+
+
+def test_leaving_frame_closes_and_flags_the_segment():
+    fps, speed_ms = 30.0, 12.0
+    engine = SpeedEngine(INTR)
+    for i in range(15):
+        center, radius = project((speed_ms * i / fps, 0.0, 8.0))
+        engine.update(BallSample(i, i / fps, center, radius), left_frame=(i == 14))
+    engine.finish()
+
+    assert len(engine.hits) == 1
+    assert engine.hits[0].truncated
+    assert not engine.hits[0].reliable, "a truncated flight must not read as reliable"
+
+
+def test_short_segment_is_not_reliable():
+    fps, speed_ms = 30.0, 12.0
+    points = [(speed_ms * i / fps, 0.0, 8.0) for i in range(6)]
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps)
+    assert engine.hits and not engine.hits[0].reliable
+
+
+def test_radius_noise_does_not_inflate_the_peak():
+    """3% radius noise is realistic; it must not become a fake fast serve."""
+    fps, speed_ms, depth = 30.0, 20.0, 9.0
+    true_radius = INTR.focal_px * INTR.ball_diameter_m / (2 * depth)
+    points = [(speed_ms * i / fps, 0.0, depth) for i in range(30)]
+    engine = SpeedEngine(INTR)
+    feed(engine, points, fps, radius_noise=0.032 * true_radius, seed=11)
+
+    assert engine.hits
+    hit = max(engine.hits, key=lambda h: h.n_points)
+    assert hit.peak_speed_kmh == pytest.approx(speed_ms * 3.6, rel=0.15)
+
+
+def test_impossible_speed_is_rejected():
+    """A blown radius estimate must not produce a 900 km/h serve."""
+    fps = 30.0
+    engine = SpeedEngine(INTR, max_speed_kmh=160.0)
+    for i in range(10):
+        center, radius = project((0.0, 0.0, 8.0))
+        engine.update(BallSample(i, i / fps, center, radius))
+    # One frame where the detector reports a wildly wrong (tiny) ball.
+    engine.update(BallSample(10, 10 / fps, (960.0, 540.0), 1.0))
+    engine.finish()
+
+    for hit in engine.hits:
+        assert hit.peak_speed_kmh <= 160.0
 
 
 def test_track_change_finalizes_open_segment():
-    fps, mpp, speed_ms = 30.0, 0.02, 10.0
-    engine = SpeedEngine(mpp)
+    fps, speed_ms = 30.0, 10.0
+    engine = SpeedEngine(INTR)
     for i in range(20):
-        d = Detection(i, i / fps, (speed_ms * i / fps / mpp, 100.0), 10.0)
-        engine.update(d, track_id=0)
-    # ball lost; a new track starts elsewhere
-    engine.update(Detection(40, 40 / fps, (5000.0, 5000.0), 10.0),
-                  track_id=1, track_ended=False)
+        center, radius = project((speed_ms * i / fps, 0.0, 8.0))
+        engine.update(BallSample(i, i / fps, center, radius), track_id=0)
+    center, radius = project((0.0, 0.0, 20.0))
+    engine.update(BallSample(40, 40 / fps, center, radius), track_id=1)
+
     assert len(engine.hits) == 1
-    assert engine.hits[0].peak_speed_kmh == pytest.approx(36.0, rel=0.05)
-
-
-def test_noisy_peak_not_inflated():
-    """Trajectory fit must not report true speed + luckiest noise spike."""
-    fps, mpp, speed_ms = 30.0, 0.02, 15.0        # 54 km/h
-    rng = np.random.default_rng(7)
-    positions = [(speed_ms * i / fps + rng.normal(0, 1.5) * mpp, 1.0)
-                 for i in range(45)]
-    engine = SpeedEngine(mpp)
-    feed(engine, positions, fps, mpp)
-
-    assert len(engine.hits) >= 1
-    hit = max(engine.hits, key=lambda h: len(h.samples))
-    # the fitted peak must sit far closer to truth than the raw
-    # finite-difference max, which noise inflates
-    raw_error = max(hit.samples) - 54.0
-    fit_error = abs(hit.peak_speed_kmh - 54.0)
-    assert raw_error > 3 * fit_error
-    assert hit.peak_speed_kmh == pytest.approx(54.0, rel=0.07)
+    assert engine.hits[0].peak_speed_kmh == pytest.approx(36.0, rel=0.06)

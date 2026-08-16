@@ -6,3 +6,6 @@ ultralytics>=8.2.0
 supervision>=0.30.0,<0.31.0   # InferenceSlicer, Detections, annotators
 trackers>=2.0.0               # ByteTrackTracker (sv.ByteTrack is removed in 0.31)
 matplotlib>=3.8.0             # ColorPalette.from_matplotlib, for the ball trail
+
+# web UI
+flask>=3.0.0                  # upload page + job polling (webapp.py)
