@@ -77,7 +77,9 @@ class SpeedEngine:
                  min_turn_speed_kmh: float = 8.0,
                  min_fit_points: int = 5,
                  max_speed_kmh: float = 160.0,
-                 radius_smoothing: int = 3):
+                 radius_smoothing: int = 3,
+                 direction_baseline: int = 3,
+                 max_gap_frames: int = 5):
         self.intrinsics = intrinsics
         self.open_kmh = open_threshold_kmh
         self.close_kmh = (close_threshold_kmh if close_threshold_kmh is not None
@@ -88,12 +90,22 @@ class SpeedEngine:
         self.min_fit_points = min_fit_points
         self.max_speed_kmh = max_speed_kmh
 
+        self.max_gap_frames = max_gap_frames
         self.hits: list[Hit] = []
         self._radii: deque[float] = deque(maxlen=max(1, radius_smoothing))
+        # Direction is judged over a multi-frame baseline, not frame to frame.
+        # A ±2px box jitter swings the single-frame direction wildly when the
+        # ball only moves a few pixels per frame, and every one of those swings
+        # looked like a contact — on synthetic footage with a known-continuous
+        # arc it fragmented one flight into three.
+        self.direction_baseline = max(1, direction_baseline)
+        self._px_trail: deque[tuple[float, float, float]] = deque(
+            maxlen=2 * self.direction_baseline + 1)
+        self._misses = 0
         self._recent = deque(maxlen=3)       # smoothed live readout
         self._last = None                    # (t, X, Y, Z)
         self._last_px = None                 # (u, v) for image-plane decisions
-        self._last_v_px = None               # (du/dt, dv/dt)
+        self._last_px_speed = None           # |image-plane velocity|, px/s
         self._last_speed_kmh = None
         self._track_id = None
         self._seg: list[tuple[float, float, float, float]] = []   # (t,X,Y,Z)
@@ -114,8 +126,17 @@ class SpeedEngine:
         self._track_id = track_id
 
         if sample is None or sample.radius_px <= 0:
+            # A gap must end the flight rather than be bridged. Interpolating
+            # across unobserved frames would invent a straight line through
+            # whatever actually happened and feed it to the fit.
+            self._misses += 1
+            if self._misses >= self.max_gap_frames and self._seg:
+                self._pending_truncated = True
+                self._finalize()
+                self._reset_motion()
             return None
 
+        self._misses = 0
         self._radii.append(sample.radius_px)
         radius = float(np.median(self._radii))
         t = sample.timestamp
@@ -134,7 +155,8 @@ class SpeedEngine:
         vx, vy, vz = (x - lx) / dt, (y - ly) / dt, (z - lz) / dt
         speed_kmh = math.sqrt(vx * vx + vy * vy + vz * vz) * 3.6
 
-        # Image-plane velocity drives the segmentation decisions (§ module doc).
+        # Image-plane motion drives the segmentation decisions (§ module doc).
+        self._px_trail.append((t, u, v))
         lu, lv = self._last_px
         vu, vv = (u - lu) / dt, (v - lv) / dt
 
@@ -144,24 +166,34 @@ class SpeedEngine:
             self._last, self._last_px = (t, x, y, z), (u, v)
             return None
 
-        if self._seg and self._is_discontinuity(vu, vv, speed_kmh):
+        # Depth noise must not reach the segmentation decisions. The
+        # instantaneous 3D speed inherits every radius wobble — a 1px error on
+        # an 8px ball swings the depth by 12% — and on synthetic footage with a
+        # known-continuous arc that was enough to trip the "speed jumped, so
+        # something hit it" rule twice, fragmenting one flight into three.
+        # Open/close therefore run on a median-smoothed speed, and the jump
+        # test runs on image-plane motion, which carries no depth at all.
+        self._recent.append(speed_kmh)
+        smoothed_kmh = float(np.median(self._recent))
+        px_speed = math.hypot(vu, vv)
+
+        if self._seg and self._is_discontinuity(px_speed, smoothed_kmh):
             self._finalize()
 
         if not self._seg:
-            if speed_kmh >= self.open_kmh:
+            if smoothed_kmh >= self.open_kmh:
                 self._seg = [(lt, lx, ly, lz), (t, x, y, z)]
                 self._seg_speeds = [speed_kmh]
         else:
             self._seg.append((t, x, y, z))
             self._seg_speeds.append(speed_kmh)
-            if speed_kmh < self.close_kmh:
+            if smoothed_kmh < self.close_kmh:
                 self._finalize()
 
         self._last, self._last_px = (t, x, y, z), (u, v)
-        self._last_v_px = (vu, vv)
-        self._last_speed_kmh = speed_kmh
-        self._recent.append(speed_kmh)
-        return float(np.median(self._recent))
+        self._last_px_speed = px_speed
+        self._last_speed_kmh = smoothed_kmh
+        return smoothed_kmh
 
     def finish(self) -> None:
         """Close any open segment at end of stream."""
@@ -174,26 +206,47 @@ class SpeedEngine:
     # --------------------------------------------------------------- private
 
     def _reset_motion(self) -> None:
-        self._last = self._last_px = self._last_v_px = None
+        self._last = self._last_px = self._last_px_speed = None
         self._last_speed_kmh = None
         self._radii.clear()
+        self._px_trail.clear()
+        self._misses = 0
 
-    def _is_discontinuity(self, vu: float, vv: float, speed_kmh: float) -> bool:
-        if self._last_v_px is None or self._last_speed_kmh is None:
+    def _direction_change_deg(self) -> float | None:
+        """Angle between two *non-overlapping* windows of image motion.
+
+        Overlapping windows were tried and do not work: sharing frames blunts a
+        real contact into a gradual turn, and a genuine bounce stopped
+        registering at all. Non-overlapping windows keep the contact sharp
+        while still averaging jitter away inside each one. The cost is that a
+        contact is recognised `direction_baseline` frames late.
+        """
+        n = self.direction_baseline
+        if len(self._px_trail) < 2 * n + 1:
+            return None
+        _, u0, v0 = self._px_trail[0]
+        _, u1, v1 = self._px_trail[n]
+        _, u2, v2 = self._px_trail[2 * n]
+        ax, ay = u1 - u0, v1 - v0
+        bx, by = u2 - u1, v2 - v1
+        # Below a few pixels of travel the direction is noise, not motion.
+        if math.hypot(ax, ay) < 3.0 or math.hypot(bx, by) < 3.0:
+            return None
+        cos = ((ax * bx + ay * by)
+               / (math.hypot(ax, ay) * math.hypot(bx, by)))
+        return math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+
+    def _is_discontinuity(self, px_speed: float, smoothed_kmh: float) -> bool:
+        if self._last_px_speed is None or self._last_speed_kmh is None:
             return False
-        if speed_kmh > self.split_speed_ratio * self._last_speed_kmh \
-                and speed_kmh >= self.open_kmh:
+        # A contact shows up as a jump in how fast the ball crosses the image.
+        if px_speed > self.split_speed_ratio * max(self._last_px_speed, 1e-6) \
+                and smoothed_kmh >= self.open_kmh:
             return True
-        if speed_kmh < self.min_turn_speed_kmh \
-                or self._last_speed_kmh < self.min_turn_speed_kmh:
+        if smoothed_kmh < self.min_turn_speed_kmh:
             return False   # direction is meaningless at near-zero speed
-        lvu, lvv = self._last_v_px
-        dot = vu * lvu + vv * lvv
-        norms = math.hypot(vu, vv) * math.hypot(lvu, lvv)
-        if norms == 0:
-            return False
-        angle = math.degrees(math.acos(max(-1.0, min(1.0, dot / norms))))
-        return angle > self.split_angle_deg
+        angle = self._direction_change_deg()
+        return angle is not None and angle > self.split_angle_deg
 
     def _finalize(self) -> None:
         seg, speeds = self._seg, self._seg_speeds

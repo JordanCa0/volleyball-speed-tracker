@@ -373,11 +373,25 @@ track/speed < 1 ms, overlay+imshow ~5–10 ms — headroom remains for
 - **Unit tests** for pure logic (`speed.py` fit + conversion math,
   `tracker.py` gap handling and gating, hit-segmentation state machine)
   using synthetic position sequences — no camera/video needed, CI-fast.
-- **Gravity drop tests (M2, primary ground truth):** film a ball in free
-  fall; physics fixes its true speed at every instant (v = g·t — after
-  0.5 s, exactly 17.6 km/h). Zero equipment, validates the entire chain
-  (detection → scale → timestamps → math) end-to-end. These clips become
-  automated regression tests against the ±10% target.
+- **Synthetic end-to-end validation (`tools/synthetic_validation.py`), the
+  ground truth we have today:** a real volleyball, cut from real footage, is
+  composited onto a real gym background along a trajectory we specify exactly,
+  then the production pipeline runs over the result. It exercises detection,
+  radius estimation, depth-from-size, the 3D fit and peak extraction against a
+  number known to the millimetre.
+
+  Current result: **72.3 km/h measured against 71.8 km/h true, +0.7%**, from a
+  single 26-point segment with the ball detected in 30/30 frames.
+
+  It does not reproduce motion blur or a real lens, so it validates the maths
+  and the plumbing, not the optics. It is a substitute for the drop test, not
+  a replacement for it.
+
+- **Gravity drop tests (still required, needs a camera):** film a ball in free
+  fall; physics fixes its true speed at every instant (v = g·t — after 0.5 s,
+  exactly 17.6 km/h). Zero equipment, and unlike the synthetic clip it
+  exercises the real optics. These clips become regression tests against the
+  ±10% target.
 - **Recorded-clip regression tests:** fixed set of serve/spike clips
   (phone slo-mo per PRD R2) with best-available reference speeds; pipeline
   output asserted within tolerance.

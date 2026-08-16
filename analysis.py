@@ -104,6 +104,7 @@ def analyse_video(source: str,
                   max_aspect: float | None = 1.6,
                   slice_inference: bool = True,
                   max_frames: int | None = None,
+                  start_frame: int = 0,
                   device: str | None = None,
                   annotate_path: str | None = None,
                   progress: Callable[[int, int | None], None] | None = None,
@@ -116,6 +117,10 @@ def analyse_video(source: str,
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+    if start_frame > 0:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        if total:
+            total = max(total - start_frame, 0)
     if max_frames is not None:
         total = min(total, max_frames) if total else max_frames
 
@@ -150,14 +155,14 @@ def analyse_video(source: str,
             detections = tracker.update(detector(frame))
             # File mode: derive time from the frame index, which is exact by
             # definition and keeps replays deterministic (TDD §6.6).
-            timestamp = frames / fps
+            timestamp = (start_frame + frames) / fps
 
             if len(detections):
                 frames_with_ball += 1
                 xyxy = detections.xyxy[0]
                 x1, y1, x2, y2 = xyxy
                 sample = BallSample(
-                    frame_idx=frames,
+                    frame_idx=start_frame + frames,
                     timestamp=timestamp,
                     center_px=((x1 + x2) / 2.0, (y1 + y2) / 2.0),
                     radius_px=ball_radius_px(xyxy),

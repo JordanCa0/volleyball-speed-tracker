@@ -101,6 +101,25 @@ upgrade. Measured on real end-on footage, it is not:
 Since depth error equals radius error, that is the difference between a usable
 result and an unusable one. The masks go unused.
 
+## Is it accurate?
+
+```bash
+.venv/bin/python tools/synthetic_validation.py
+```
+
+This composites a **real** volleyball, cut from real footage, onto a real gym
+background along a trajectory specified to the millimetre, then runs the whole
+production pipeline over it:
+
+```
+TRUE peak:     71.8 km/h
+MEASURED peak: 72.3 km/h   (+0.7%, 26-point fit, ball found in 30/30 frames)
+```
+
+That validates detection → radius → depth → 3D fit → peak against known truth.
+It does **not** reproduce motion blur or a real lens, so the gravity drop test
+(TDD §8) is still required before trusting numbers from real footage.
+
 ## Detection
 
 Stock COCO weights are not a volleyball detector — on sample footage the real
@@ -166,9 +185,13 @@ Run the tests with `.venv/bin/python -m pytest tests`.
 
 ## Known limitations
 
-- **Detection recall is the ceiling.** On hand-labelled club-gym frames the
-  ball was visible but undetected in 2 of 8. No downstream maths recovers
-  those. Fine-tuning on your own footage is the fix.
+- **Detection recall is the ceiling, and on `input_videos/` it currently
+  blocks measurement entirely.** The model finds *yellow* balls confidently
+  (0.84) but never finds the white ball in play against grey concrete, even at
+  confidence 0.05 with 3×3 tiling. Over a 250-frame window every detection was
+  a static false positive at a fixed pixel position — net poles, not a ball.
+  **Fine-tuning is required**, not optional: label end-on footage with white
+  balls at far range, plus hard negatives for net poles and wall marks.
 - **Static suppression assumes a roughly fixed camera.** Under a hard pan the
   court lines move, stop looking static, and survive the filter. Use a tripod.
 - **A held ball is suppressed** — it is stationary. Harmless for speed, odd to

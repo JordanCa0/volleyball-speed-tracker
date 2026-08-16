@@ -93,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-players", action="store_true")
     parser.add_argument("--max-frames", type=int,
                         help="stop after N frames (for quick experiments)")
+    parser.add_argument("--start-frame", type=int, default=0,
+                        help="skip to this frame before analysing (--speed only)")
     parser.add_argument("--device", help="torch device, e.g. mps / cuda / cpu")
     parser.add_argument("--save", metavar="OUT.mp4", help="write annotated video here")
     parser.add_argument("--no-display", action="store_true")
@@ -156,6 +158,7 @@ def run_speed(args) -> None:
         max_side_px=args.ball_max_size or None,
         max_aspect=args.ball_max_aspect or None,
         slice_inference=not args.no_slice, max_frames=args.max_frames,
+        start_frame=args.start_frame,
         device=args.device, annotate_path=args.save,
         progress=lambda n, total: print(f"  {n}/{total or '?'} frames", flush=True)
         if n % 100 == 0 else None,
